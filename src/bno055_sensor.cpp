@@ -45,7 +45,7 @@ BNO055Sensor::BNO055Sensor(rclcpp::NodeOptions const & options)
   sensor_.bus_write = BNO055_I2C_bus_write;
   sensor_.delay_msec = BNO055_delay_msek;
 
-  cfg_recorded = false;
+  cfg_recorded = 0;
 
   initialise();
 }
@@ -77,13 +77,17 @@ void BNO055Sensor::initialise()
 
   // set operation mode as CONFIG to start
   comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
+
+  bool config_loaded = true;
   try {
     std::ifstream bno055_config;
     bno055_config.open("bno055_config.cfg");
     // write to registers 0x55 to 0x6A
     u8 reg_ = 0x55;
+    std::string line;
     while(getline(bno055_config, line)) {
-      u8 data_ = std::stoi(line, nullptr, 16);
+      // strip the newline character and load the integer value into data
+      u8 data_ = std::stoi(line);
       comres += bno055_write_register(reg_, &data_, 1);
       RCLCPP_INFO(this->get_logger(), "Wrote config data to register 0x%02x", reg_);
       reg_++;
@@ -92,9 +96,15 @@ void BNO055Sensor::initialise()
   }
   catch (...) {
     RCLCPP_INFO(this->get_logger(), "Config file has not been created. Running in NDOF");
+    config_loaded = false;
   }
   
-  comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
+  // calibrate magnet quickly if config does not get loaded
+  if (config_loaded) {
+    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF_FMC_OFF);
+  } else {
+    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
+  }
 
   if (comres != 0)
   {
@@ -187,8 +197,8 @@ void BNO055Sensor::publish_data()
     RCLCPP_WARN(this->get_logger(), "Fusion data is not reliable as system is not calibrated");
     return;
   }
-  
-  if (!cfg_recorded && sys_calib_status == 3 && 
+
+  if (cfg_recorded != 10 && sys_calib_status == 3 && 
       gyro_calib_status == 3 && accel_calib_status == 3 && 
       mag_calib_status == 3)
   {
@@ -203,14 +213,15 @@ void BNO055Sensor::publish_data()
     {
       u8 data;
       bno055_read_register(i, &data, 1); // 1 byte per register
-      bno055_config << data << "\n";
+      bno055_config << std::to_string(data) << "\n";
     }
     bno055_config.close();
 
-    // set the operation mode back
-    bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
+    // set the operation mode to NDOF OFF once magnetometer calibration is complete
+    // it calibrates quicker in fmc on mode
+    bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF_FMC_OFF);
 
-    cgf_recorded = true;
+    cfg_recorded++;
   }
 
   auto imu_data_msg = sensor_msgs::msg::Imu();
