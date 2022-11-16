@@ -38,7 +38,6 @@ BNO055Sensor::BNO055Sensor(rclcpp::NodeOptions const & options)
   diagnostics_timer_ = this->create_wall_timer(1000ms, std::bind(&BNO055Sensor::publish_diagnostics, this));
 
   this->declare_parameter<std::string>("i2c_address", "/dev/i2c-3");
-  this->declare_parameter<std::string>("bno_operation_mode", "ndof");
   this->declare_parameter<std::string>("device_address", "0x28");
   this->declare_parameter<std::string>("frame_id", "imu_link");
 
@@ -67,9 +66,6 @@ void BNO055Sensor::initialise()
   std::string dev_addr;
   this->get_parameter("device_address", dev_addr);
 
-  std::string bno_operation_mode;
-  this->get_parameter("bno_operation_mode", bno_operation_mode);
-
   sensor_.dev_addr = BNO055_I2C_ADDR1; //TODO convert dev_addr from string to byte
   int retval = init_i2cbus(i2c_addr.c_str(), dev_addr.c_str());
 
@@ -79,13 +75,26 @@ void BNO055Sensor::initialise()
   // set the power mode as NORMAL
   comres += bno055_set_power_mode(BNO055_POWER_MODE_NORMAL);
 
-  // set operation mode as NDOF
-  if (bno_operation_mode == "ndof"):
-    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
-  else if (bno_operation_mode == "config"):
-    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
+  // set operation mode as CONFIG to start
+  comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
+  try {
     std::ifstream bno055_config;
     bno055_config.open("bno055_config.cfg");
+    // write to registers 0x55 to 0x6A
+    u8 reg_ = 0x55;
+    while(getline(bno055_config, line)) {
+      u8 data_ = std::stoi(line, nullptr, 16);
+      comres += bno055_write_register(reg_, &data_, 1);
+      RCLCPP_INFO(this->get_logger(), "Wrote config data to register 0x%02x", reg_);
+      reg_++;
+    }
+    bno055_config.close();
+  }
+  catch (...) {
+    RCLCPP_INFO(this->get_logger(), "Config file has not been created. Running in NDOF");
+  }
+  
+  comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
 
   if (comres != 0)
   {
