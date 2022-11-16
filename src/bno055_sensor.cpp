@@ -17,6 +17,8 @@
 #include "bno055_sensor/bno055_i2c.h"
 
 #include <cmath>
+#include <fstream>
+#include <iostream>
 
 using namespace std::chrono_literals;
 
@@ -36,12 +38,15 @@ BNO055Sensor::BNO055Sensor(rclcpp::NodeOptions const & options)
   diagnostics_timer_ = this->create_wall_timer(1000ms, std::bind(&BNO055Sensor::publish_diagnostics, this));
 
   this->declare_parameter<std::string>("i2c_address", "/dev/i2c-3");
+  this->declare_parameter<std::string>("bno_operation_mode", "ndof");
   this->declare_parameter<std::string>("device_address", "0x28");
   this->declare_parameter<std::string>("frame_id", "imu_link");
 
   sensor_.bus_read = BNO055_I2C_bus_read;
   sensor_.bus_write = BNO055_I2C_bus_write;
   sensor_.delay_msec = BNO055_delay_msek;
+
+  cfg_recorded = false;
 
   initialise();
 }
@@ -62,6 +67,9 @@ void BNO055Sensor::initialise()
   std::string dev_addr;
   this->get_parameter("device_address", dev_addr);
 
+  std::string bno_operation_mode;
+  this->get_parameter("bno_operation_mode", bno_operation_mode);
+
   sensor_.dev_addr = BNO055_I2C_ADDR1; //TODO convert dev_addr from string to byte
   int retval = init_i2cbus(i2c_addr.c_str(), dev_addr.c_str());
 
@@ -72,7 +80,12 @@ void BNO055Sensor::initialise()
   comres += bno055_set_power_mode(BNO055_POWER_MODE_NORMAL);
 
   // set operation mode as NDOF
-  comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
+  if (bno_operation_mode == "ndof"):
+    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
+  else if (bno_operation_mode == "config"):
+    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
+    std::ifstream bno055_config;
+    bno055_config.open("bno055_config.cfg");
 
   if (comres != 0)
   {
@@ -86,6 +99,9 @@ void BNO055Sensor::publish_data()
 
   u8 system_status;
   u8 sys_calib_status;
+  u8 gyro_calib_status;
+  u8 accel_calib_status;
+  u8 mag_calib_status;
   
   bno055_gyro_t gyro_xyz;
   bno055_linear_accel_t linear_accel_xyz;
@@ -100,6 +116,9 @@ void BNO055Sensor::publish_data()
 
   comres += bno055_get_sys_stat_code(&system_status);
   comres += bno055_get_sys_calib_stat(&sys_calib_status);
+  comres += bno055_get_gyro_calib_stat(&gyro_calib_status);
+  comres += bno055_get_accel_calib_stat(&accel_calib_status);
+  comres += bno055_get_mag_calib_stat(&mag_calib_status);
 
   // read the raw data
   comres += bno055_read_gyro_xyz(&gyro_xyz);
@@ -114,7 +133,6 @@ void BNO055Sensor::publish_data()
   comres += bno055_convert_double_linear_accel_xyz_msq(&d_linear_accel_xyz);
   comres += bno055_convert_double_gravity_xyz_msq(&d_gravity_xyz);
   comres += bno055_convert_double_mag_xyz_uT(&d_mag_xyz);
-
 
   if (comres != 0 || system_status == 1)
   {
@@ -159,6 +177,31 @@ void BNO055Sensor::publish_data()
   {
     RCLCPP_WARN(this->get_logger(), "Fusion data is not reliable as system is not calibrated");
     return;
+  }
+  
+  if (!cfg_recorded && sys_calib_status == 3 && 
+      gyro_calib_status == 3 && accel_calib_status == 3 && 
+      mag_calib_status == 3)
+  {
+    bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
+
+    RCLCPP_INFO(this->get_logger(), "System fully calibrated. Saving configuration offset to file.");
+    std::ofstream bno055_config;
+    bno055_config.open("bno055_config.cfg", std::ios::out | std::ios::trunc);
+    
+    // write the register values from 0x55 to 0x6A
+    for (u8 i = 0x55; i <= 0x6A; i++)
+    {
+      u8 data;
+      bno055_read_register(i, &data, 1); // 1 byte per register
+      bno055_config << data << "\n";
+    }
+    bno055_config.close();
+
+    // set the operation mode back
+    bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
+
+    cgf_recorded = true;
   }
 
   auto imu_data_msg = sensor_msgs::msg::Imu();
@@ -269,8 +312,8 @@ void BNO055Sensor::publish_diagnostics()
       diagnostic_msg.values[0].key = "System Error";
       diagnostic_msg.values[0].value = system_error_as_string(system_error);
     }
-    else
-    {
+    else 
+    { 
       diagnostic_msg.values.resize(5);
       diagnostic_msg.values[0].key = "System Status";
       diagnostic_msg.values[0].value = system_status_as_string(system_status);

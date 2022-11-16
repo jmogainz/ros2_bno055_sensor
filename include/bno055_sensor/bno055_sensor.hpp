@@ -59,6 +59,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Temperature>::SharedPtr temp_publisher_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticStatus>::SharedPtr diagnostics_publisher_;
   size_t count_;  
+  bool cfg_recorded;
 };
 
 }  // namespace bno055_sensor
