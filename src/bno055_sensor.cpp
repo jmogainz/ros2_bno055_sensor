@@ -25,344 +25,388 @@ using namespace std::chrono_literals;
 namespace bno055_sensor
 {
 
-BNO055Sensor::BNO055Sensor(rclcpp::NodeOptions const & options)
-:  Node("bno055_sensor_node"), count_(0)
-{
-  imu_raw_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>("imu/raw", 10);
-  imu_data_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>("imu/data", 10);
-  gravity_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("gravity", 10);
-  mag_publisher_ = this->create_publisher<sensor_msgs::msg::MagneticField>("mag", 10);
-  temp_publisher_ = this->create_publisher<sensor_msgs::msg::Temperature>("temp", 10);
-  diagnostics_publisher_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticStatus>("diagnostics", 10);
-  data_timer_ = this->create_wall_timer(10ms, std::bind(&BNO055Sensor::publish_data, this));
-  diagnostics_timer_ = this->create_wall_timer(1000ms, std::bind(&BNO055Sensor::publish_diagnostics, this));
-
-  this->declare_parameter<std::string>("i2c_address", "/dev/i2c-3");
-  this->declare_parameter<std::string>("device_address", "0x28");
-  this->declare_parameter<std::string>("frame_id", "imu_link");
-
-  sensor_.bus_read = BNO055_I2C_bus_read;
-  sensor_.bus_write = BNO055_I2C_bus_write;
-  sensor_.delay_msec = BNO055_delay_msek;
-
-  cfg_recorded = 0;
-
-  initialise();
-}
-
-BNO055Sensor::~BNO055Sensor()
-{
-  // set the power mode as SUSPEND
-  bno055_set_power_mode(BNO055_POWER_MODE_SUSPEND);
-
-  close_i2cbus();
-}
-
-void BNO055Sensor::initialise()
-{
-  std::string i2c_addr;
-  this->get_parameter("i2c_address", i2c_addr);
-
-  std::string dev_addr;
-  this->get_parameter("device_address", dev_addr);
-
-  sensor_.dev_addr = BNO055_I2C_ADDR1; //TODO convert dev_addr from string to byte
-  int retval = init_i2cbus(i2c_addr.c_str(), dev_addr.c_str());
-
-  s32 comres = BNO055_SUCCESS;
-  comres += bno055_init(&sensor_);
-
-  // set the power mode as NORMAL
-  comres += bno055_set_power_mode(BNO055_POWER_MODE_NORMAL);
-
-  // set operation mode as CONFIG to start
-  comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
-
-  bool config_loaded = true;
-  try {
-    std::ifstream bno055_config;
-    bno055_config.open("bno055_config.cfg");
-    // write to registers 0x55 to 0x6A
-    u8 reg_ = 0x55;
-    std::string line;
-    while(getline(bno055_config, line)) {
-      // strip the newline character and load the integer value into data
-      u8 data_ = std::stoi(line);
-      comres += bno055_write_register(reg_, &data_, 1);
-      RCLCPP_INFO(this->get_logger(), "Wrote config data to register 0x%02x", reg_);
-      reg_++;
-    }
-    bno055_config.close();
-  }
-  catch (...) {
-    RCLCPP_INFO(this->get_logger(), "Config file has not been created. Running in NDOF");
-    config_loaded = false;
-  }
-  
-  // calibrate magnet quickly if config does not get loaded
-  if (config_loaded) {
-    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF_FMC_OFF);
-  } else {
-    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
-  }
-
-  if (comres != 0)
+  BNO055Sensor::BNO055Sensor(rclcpp::NodeOptions const &options)
+      : Node("bno055_sensor_node"), count_(0)
   {
-    RCLCPP_FATAL(this->get_logger(), "Error setting up BNO055 sensor");
-  }
-}
+    imu_raw_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>("imu/raw", 10);
+    imu_data_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>("imu/data", 10);
+    gravity_publisher_ = this->create_publisher<geometry_msgs::msg::Vector3Stamped>("gravity", 10);
+    mag_publisher_ = this->create_publisher<sensor_msgs::msg::MagneticField>("mag", 10);
+    temp_publisher_ = this->create_publisher<sensor_msgs::msg::Temperature>("temp", 10);
+    diagnostics_publisher_ = this->create_publisher<diagnostic_msgs::msg::DiagnosticStatus>("diagnostics", 10);
+    data_timer_ = this->create_wall_timer(10ms, std::bind(&BNO055Sensor::publish_data, this));
+    diagnostics_timer_ = this->create_wall_timer(1000ms, std::bind(&BNO055Sensor::publish_diagnostics, this));
 
-void BNO055Sensor::publish_data()
-{
-  s32 comres = BNO055_SUCCESS;
+    this->declare_parameter<std::string>("i2c_address", "/dev/i2c-3");
+    this->declare_parameter<std::string>("device_address", "0x28");
+    this->declare_parameter<std::string>("frame_id", "imu_link");
 
-  u8 system_status;
-  u8 sys_calib_status;
-  u8 gyro_calib_status;
-  u8 accel_calib_status;
-  u8 mag_calib_status;
-  
-  bno055_gyro_t gyro_xyz;
-  bno055_linear_accel_t linear_accel_xyz;
+    sensor_.bus_read = BNO055_I2C_bus_read;
+    sensor_.bus_write = BNO055_I2C_bus_write;
+    sensor_.delay_msec = BNO055_delay_msek;
 
-  bno055_quaternion_t quaternion_wxyz;
-  bno055_gyro_double_t d_gyro_xyz;
-  bno055_euler_double_t d_euler_hpr;
-  bno055_linear_accel_double_t d_linear_accel_xyz;
-  bno055_gravity_double_t d_gravity_xyz;
-  bno055_mag_double_t d_mag_xyz;
-  double d_temp;
+    cfg_recorded = 0;
 
-  comres += bno055_get_sys_stat_code(&system_status);
-  comres += bno055_get_sys_calib_stat(&sys_calib_status);
-  comres += bno055_get_gyro_calib_stat(&gyro_calib_status);
-  comres += bno055_get_accel_calib_stat(&accel_calib_status);
-  comres += bno055_get_mag_calib_stat(&mag_calib_status);
-
-  // read the raw data
-  comres += bno055_read_gyro_xyz(&gyro_xyz);
-  comres += bno055_read_linear_accel_xyz(&linear_accel_xyz);
-  comres += bno055_convert_double_temp_celsius(&d_temp);
-
-  // read the fusion data
-  comres += bno055_read_quaternion_wxyz(&quaternion_wxyz);
-  
-  // read fusion data and convert the data into SI units
-  comres += bno055_convert_double_gyro_xyz_dps(&d_gyro_xyz);
-  comres += bno055_convert_double_linear_accel_xyz_msq(&d_linear_accel_xyz);
-  comres += bno055_convert_double_gravity_xyz_msq(&d_gravity_xyz);
-  comres += bno055_convert_double_mag_xyz_uT(&d_mag_xyz);
-
-  if (comres != 0 || system_status == 1)
-  {
-    RCLCPP_FATAL(this->get_logger(), "Error reading BNO055 data");
-    return;
+    initialise();
   }
 
-  double quaternion_norm = std::sqrt(
-    quaternion_wxyz.w * quaternion_wxyz.w +
-    quaternion_wxyz.x * quaternion_wxyz.x +
-    quaternion_wxyz.y * quaternion_wxyz.y +
-    quaternion_wxyz.z * quaternion_wxyz.z);
-
-  auto time_stamp = now();
-
-  std::string frame_id;
-  this->get_parameter("frame_id", frame_id);
-
-  auto imu_raw_msg = sensor_msgs::msg::Imu();
-  imu_raw_msg.header.stamp = time_stamp;
-  imu_raw_msg.header.frame_id = frame_id;
-  imu_raw_msg.orientation.x = 0;
-  imu_raw_msg.orientation.y = 0;
-  imu_raw_msg.orientation.z = 0;
-  imu_raw_msg.orientation.w = 0;
-  imu_raw_msg.angular_velocity.x = gyro_xyz.x;
-  imu_raw_msg.angular_velocity.y = gyro_xyz.y;
-  imu_raw_msg.angular_velocity.z = gyro_xyz.z;
-  imu_raw_msg.linear_acceleration.x = linear_accel_xyz.x;
-  imu_raw_msg.linear_acceleration.y = linear_accel_xyz.y;
-  imu_raw_msg.linear_acceleration.z = linear_accel_xyz.z;
-
-  auto temp_msg = sensor_msgs::msg::Temperature();
-  temp_msg.header.stamp = time_stamp;
-  temp_msg.header.frame_id = frame_id;
-  temp_msg.temperature = d_temp;
-
-  imu_raw_publisher_->publish(imu_raw_msg);
-  temp_publisher_->publish(temp_msg);
-
-  if (sys_calib_status == 0)
+  BNO055Sensor::~BNO055Sensor()
   {
-    RCLCPP_WARN(this->get_logger(), "Fusion data is not reliable as system is not calibrated");
-    return;
+    // set the power mode as SUSPEND
+    bno055_set_power_mode(BNO055_POWER_MODE_SUSPEND);
+
+    close_i2cbus();
   }
 
-  if (cfg_recorded != 10 && sys_calib_status == 3 && 
-      gyro_calib_status == 3 && accel_calib_status == 3 && 
-      mag_calib_status == 3)
+  void BNO055Sensor::initialise()
   {
-    bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
+    std::string i2c_addr;
+    this->get_parameter("i2c_address", i2c_addr);
 
-    RCLCPP_INFO(this->get_logger(), "System fully calibrated. Saving configuration offset to file.");
-    std::ofstream bno055_config;
-    bno055_config.open("bno055_config.cfg", std::ios::out | std::ios::trunc);
-    
-    // write the register values from 0x55 to 0x6A
-    for (u8 i = 0x55; i <= 0x6A; i++)
+    std::string dev_addr;
+    this->get_parameter("device_address", dev_addr);
+
+    sensor_.dev_addr = BNO055_I2C_ADDR1; // TODO convert dev_addr from string to byte
+    int retval = init_i2cbus(i2c_addr.c_str(), dev_addr.c_str());
+
+    s32 comres = BNO055_SUCCESS;
+    comres += bno055_init(&sensor_);
+
+    // set the power mode as NORMAL
+    comres += bno055_set_power_mode(BNO055_POWER_MODE_NORMAL);
+
+    // set operation mode as CONFIG to start
+    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
+
+    bool config_loaded = true;
+    try
     {
-      u8 data;
-      bno055_read_register(i, &data, 1); // 1 byte per register
-      bno055_config << std::to_string(data) << "\n";
+      std::ifstream bno055_config;
+      bno055_config.open("bno055_config.cfg");
+      // write to registers 0x55 to 0x6A
+      u8 reg_ = 0x55;
+      std::string line;
+      while (getline(bno055_config, line))
+      {
+        // strip the newline character and load the integer value into data
+        u8 data_ = std::stoi(line);
+        comres += bno055_write_register(reg_, &data_, 1);
+        RCLCPP_INFO(this->get_logger(), "Wrote config data to register 0x%02x", reg_);
+        reg_++;
+      }
+      bno055_config.close();
     }
-    bno055_config.close();
+    catch (...)
+    {
+      RCLCPP_INFO(this->get_logger(), "Config file has not been created. Running in NDOF");
+      config_loaded = false;
+    }
 
-    // set the operation mode to NDOF OFF once magnetometer calibration is complete
-    // it calibrates quicker in fmc on mode
-    bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF_FMC_OFF);
+    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
 
-    cfg_recorded++;
+    if (comres != 0)
+    {
+      RCLCPP_FATAL(this->get_logger(), "Error setting up BNO055 sensor");
+    }
   }
 
-  auto imu_data_msg = sensor_msgs::msg::Imu();
-  imu_data_msg.header.stamp = time_stamp;
-  imu_data_msg.header.frame_id = frame_id;
-  imu_data_msg.orientation.x = quaternion_wxyz.x / quaternion_norm;
-  imu_data_msg.orientation.y = quaternion_wxyz.y / quaternion_norm;
-  imu_data_msg.orientation.z = quaternion_wxyz.z / quaternion_norm;
-  imu_data_msg.orientation.w = quaternion_wxyz.w / quaternion_norm;
-  imu_data_msg.angular_velocity.x = d_gyro_xyz.x;
-  imu_data_msg.angular_velocity.y = d_gyro_xyz.y;
-  imu_data_msg.angular_velocity.z = d_gyro_xyz.z;
-  imu_data_msg.linear_acceleration.x = d_linear_accel_xyz.x;
-  imu_data_msg.linear_acceleration.y = d_linear_accel_xyz.y;
-  imu_data_msg.linear_acceleration.z = d_linear_accel_xyz.z;
-
-  auto gravity_msg = geometry_msgs::msg::Vector3Stamped();
-  gravity_msg.header.stamp = time_stamp;
-  gravity_msg.header.frame_id = frame_id;
-  gravity_msg.vector.x = d_gravity_xyz.x;
-  gravity_msg.vector.y = d_gravity_xyz.y;
-  gravity_msg.vector.z = d_gravity_xyz.z;
-
-  auto mag_msg = sensor_msgs::msg::MagneticField();
-  mag_msg.header.stamp = time_stamp;
-  mag_msg.header.frame_id = frame_id;
-  mag_msg.magnetic_field.x = d_mag_xyz.x;
-  mag_msg.magnetic_field.y = d_mag_xyz.y;
-  mag_msg.magnetic_field.z = d_mag_xyz.z;
-
-  imu_data_publisher_->publish(imu_data_msg);
-  gravity_publisher_->publish(gravity_msg);
-  mag_publisher_->publish(mag_msg);
-
-  count_++;
-}
-
-std::string BNO055Sensor::system_status_as_string(u8 system_status)
-{
-  std::string retval;
-  switch (system_status)
+  void BNO055Sensor::publish_data()
   {
-    case 0: retval = "System idle"; break;
-    case 1: retval = "System Error"; break;
-    case 2: retval = "Initializing peripherals"; break;
-    case 3: retval = "System Initialization"; break;
-    case 4: retval = "Executing Selftest"; break;
-    case 5: retval = "Sensor fusion algorithm running"; break;
-    case 6: retval = "System running without fusion algorithm"; break;
-  }
-  return retval;
-}
+    s32 comres = BNO055_SUCCESS;
 
-std::string BNO055Sensor::system_error_as_string(u8 system_error)
-{
-  std::string retval;
-  switch (system_error)
-  {
-    case 0: retval = "No Error"; break;
-    case 1: retval = "Peripheral initialization error"; break;
-    case 2: retval = "System initialization error"; break;
-    case 3: retval = "Selftest result failed"; break;
-    case 4: retval = "Register map value out of range"; break;
-    case 5: retval = "Register map address out of range"; break;
-    case 6: retval = "Register map write error"; break;
-    case 7: retval = "BNO low power mode not  available for selected operation mode"; break;
-    case 8: retval = "Accelerometer power mode not available"; break;
-    case 9: retval = "Fusion algorithm configuration error"; break;
-  }
-  return retval;
-}
-
-void BNO055Sensor::publish_diagnostics()
-{
-  try
-  {
     u8 system_status;
-    u8 system_error;
     u8 sys_calib_status;
     u8 gyro_calib_status;
     u8 accel_calib_status;
     u8 mag_calib_status;
 
-    // get the status variables
-    s32 comres = BNO055_SUCCESS;
+    bno055_gyro_t gyro_xyz;
+    bno055_linear_accel_t linear_accel_xyz;
 
-    auto diagnostic_msg = diagnostic_msgs::msg::DiagnosticStatus();
-    diagnostic_msg.name = "BNO055";
+    bno055_quaternion_t quaternion_wxyz;
+    bno055_gyro_double_t d_gyro_xyz;
+    bno055_euler_double_t d_euler_hpr;
+    bno055_linear_accel_double_t d_linear_accel_xyz;
+    bno055_gravity_double_t d_gravity_xyz;
+    bno055_mag_double_t d_mag_xyz;
+    double d_temp;
 
     comres += bno055_get_sys_stat_code(&system_status);
-    comres += bno055_get_sys_error_code(&system_error);
     comres += bno055_get_sys_calib_stat(&sys_calib_status);
     comres += bno055_get_gyro_calib_stat(&gyro_calib_status);
     comres += bno055_get_accel_calib_stat(&accel_calib_status);
     comres += bno055_get_mag_calib_stat(&mag_calib_status);
 
-    if (comres != BNO055_SUCCESS)
-    {
-      diagnostic_msg.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
-      diagnostic_msg.message = "Disconnected";
-      diagnostic_msg.values.resize(0);
-    }
-    else if (system_status == 1)
-    {
-      diagnostic_msg.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
-      diagnostic_msg.message = "BNO055 System Error";
-      diagnostic_msg.values.resize(1);
-      diagnostic_msg.values[0].key = "System Error";
-      diagnostic_msg.values[0].value = system_error_as_string(system_error);
-    }
-    else 
-    { 
-      diagnostic_msg.values.resize(5);
-      diagnostic_msg.values[0].key = "System Status";
-      diagnostic_msg.values[0].value = system_status_as_string(system_status);
-      diagnostic_msg.values[1].key = "Calibration (SYS)";
-      diagnostic_msg.values[1].value = std::to_string(sys_calib_status);
-      diagnostic_msg.values[2].key = "Calibration (GYR)";
-      diagnostic_msg.values[2].value = std::to_string(gyro_calib_status);
-      diagnostic_msg.values[3].key = "Calibration (ACC)";
-      diagnostic_msg.values[3].value = std::to_string(accel_calib_status);
-      diagnostic_msg.values[4].key = "Calibration (MAG)";
-      diagnostic_msg.values[4].value = std::to_string(mag_calib_status);
+    // read the raw data
+    comres += bno055_read_gyro_xyz(&gyro_xyz);
+    comres += bno055_read_linear_accel_xyz(&linear_accel_xyz);
+    comres += bno055_convert_double_temp_celsius(&d_temp);
 
-      if (sys_calib_status < 1 || gyro_calib_status < 1 || accel_calib_status < 1 || mag_calib_status < 1)
+    // read the fusion data
+    comres += bno055_read_quaternion_wxyz(&quaternion_wxyz);
+
+    // read fusion data and convert the data into SI units
+    comres += bno055_convert_double_gyro_xyz_dps(&d_gyro_xyz);
+    comres += bno055_convert_double_linear_accel_xyz_msq(&d_linear_accel_xyz);
+    comres += bno055_convert_double_gravity_xyz_msq(&d_gravity_xyz);
+    comres += bno055_convert_double_mag_xyz_uT(&d_mag_xyz);
+
+    if (comres != 0 || system_status == 1)
+    {
+      RCLCPP_FATAL(this->get_logger(), "Error reading BNO055 data");
+      return;
+    }
+
+    double quaternion_norm = std::sqrt(
+        quaternion_wxyz.w * quaternion_wxyz.w +
+        quaternion_wxyz.x * quaternion_wxyz.x +
+        quaternion_wxyz.y * quaternion_wxyz.y +
+        quaternion_wxyz.z * quaternion_wxyz.z);
+
+    auto time_stamp = now();
+
+    std::string frame_id;
+    this->get_parameter("frame_id", frame_id);
+
+    auto imu_raw_msg = sensor_msgs::msg::Imu();
+    imu_raw_msg.header.stamp = time_stamp;
+    imu_raw_msg.header.frame_id = frame_id;
+    imu_raw_msg.orientation.x = 0;
+    imu_raw_msg.orientation.y = 0;
+    imu_raw_msg.orientation.z = 0;
+    imu_raw_msg.orientation.w = 0;
+    imu_raw_msg.angular_velocity.x = gyro_xyz.x;
+    imu_raw_msg.angular_velocity.y = gyro_xyz.y;
+    imu_raw_msg.angular_velocity.z = gyro_xyz.z;
+    imu_raw_msg.linear_acceleration.x = linear_accel_xyz.x;
+    imu_raw_msg.linear_acceleration.y = linear_accel_xyz.y;
+    imu_raw_msg.linear_acceleration.z = linear_accel_xyz.z;
+
+    auto temp_msg = sensor_msgs::msg::Temperature();
+    temp_msg.header.stamp = time_stamp;
+    temp_msg.header.frame_id = frame_id;
+    temp_msg.temperature = d_temp;
+
+    imu_raw_publisher_->publish(imu_raw_msg);
+    temp_publisher_->publish(temp_msg);
+
+    // if (sys_calib_status == 0)
+    // {
+    //   RCLCPP_WARN(this->get_logger(), "Fusion data is not reliable as system is not calibrated");
+    //   return;
+    // }
+
+    if (cfg_recorded != 10 && sys_calib_status == 3 &&
+        gyro_calib_status == 3 && accel_calib_status == 3 &&
+        mag_calib_status == 3)
+    {
+      bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
+
+      RCLCPP_INFO(this->get_logger(), "System fully calibrated. Saving configuration offset to file.");
+      std::ofstream bno055_config;
+      bno055_config.open("bno055_config.cfg", std::ios::out | std::ios::trunc);
+
+      // write the register values from 0x55 to 0x6A
+      for (u8 i = 0x55; i <= 0x6A; i++)
       {
-	diagnostic_msg.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-	diagnostic_msg.message = "Poorly Calibrated";
+        u8 data;
+        bno055_read_register(i, &data, 1); // 1 byte per register
+        bno055_config << std::to_string(data) << "\n";
+      }
+      bno055_config.close();
+
+      // set the operation mode to NDOF OFF once magnetometer calibration is complete
+      // it calibrates quicker in fmc on mode
+      bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF_FMC_OFF);
+
+      cfg_recorded++;
+    }
+
+    auto imu_data_msg = sensor_msgs::msg::Imu();
+    imu_data_msg.header.stamp = time_stamp;
+    imu_data_msg.header.frame_id = frame_id;
+    imu_data_msg.orientation.x = quaternion_wxyz.x / quaternion_norm;
+    imu_data_msg.orientation.y = quaternion_wxyz.y / quaternion_norm;
+    imu_data_msg.orientation.z = quaternion_wxyz.z / quaternion_norm;
+    imu_data_msg.orientation.w = quaternion_wxyz.w / quaternion_norm;
+    imu_data_msg.angular_velocity.x = d_gyro_xyz.x;
+    imu_data_msg.angular_velocity.y = d_gyro_xyz.y;
+    imu_data_msg.angular_velocity.z = d_gyro_xyz.z;
+    imu_data_msg.linear_acceleration.x = d_linear_accel_xyz.x;
+    imu_data_msg.linear_acceleration.y = d_linear_accel_xyz.y;
+    imu_data_msg.linear_acceleration.z = d_linear_accel_xyz.z;
+
+    // set believable covariance values with zero mean
+    imu_data_msg.orientation_covariance[0] = 0.001;
+    imu_data_msg.orientation_covariance[4] = 0.001;
+    imu_data_msg.orientation_covariance[8] = 0.001;
+    imu_data_msg.angular_velocity_covariance[0] = 0.002;
+    imu_data_msg.angular_velocity_covariance[4] = 0.001;
+    imu_data_msg.angular_velocity_covariance[8] = 0.002;
+    imu_data_msg.linear_acceleration_covariance[0] = 0.001;
+    imu_data_msg.linear_acceleration_covariance[4] = 0.0001;
+    imu_data_msg.linear_acceleration_covariance[8] = -0.02;
+
+    auto gravity_msg = geometry_msgs::msg::Vector3Stamped();
+    gravity_msg.header.stamp = time_stamp;
+    gravity_msg.header.frame_id = frame_id;
+    gravity_msg.vector.x = d_gravity_xyz.x;
+    gravity_msg.vector.y = d_gravity_xyz.y;
+    gravity_msg.vector.z = d_gravity_xyz.z;
+
+    auto mag_msg = sensor_msgs::msg::MagneticField();
+    mag_msg.header.stamp = time_stamp;
+    mag_msg.header.frame_id = frame_id;
+    mag_msg.magnetic_field.x = d_mag_xyz.x;
+    mag_msg.magnetic_field.y = d_mag_xyz.y;
+    mag_msg.magnetic_field.z = d_mag_xyz.z;
+
+    imu_data_publisher_->publish(imu_data_msg);
+    gravity_publisher_->publish(gravity_msg);
+    mag_publisher_->publish(mag_msg);
+
+    count_++;
+  }
+
+  std::string BNO055Sensor::system_status_as_string(u8 system_status)
+  {
+    std::string retval;
+    switch (system_status)
+    {
+    case 0:
+      retval = "System idle";
+      break;
+    case 1:
+      retval = "System Error";
+      break;
+    case 2:
+      retval = "Initializing peripherals";
+      break;
+    case 3:
+      retval = "System Initialization";
+      break;
+    case 4:
+      retval = "Executing Selftest";
+      break;
+    case 5:
+      retval = "Sensor fusion algorithm running";
+      break;
+    case 6:
+      retval = "System running without fusion algorithm";
+      break;
+    }
+    return retval;
+  }
+
+  std::string BNO055Sensor::system_error_as_string(u8 system_error)
+  {
+    std::string retval;
+    switch (system_error)
+    {
+    case 0:
+      retval = "No Error";
+      break;
+    case 1:
+      retval = "Peripheral initialization error";
+      break;
+    case 2:
+      retval = "System initialization error";
+      break;
+    case 3:
+      retval = "Selftest result failed";
+      break;
+    case 4:
+      retval = "Register map value out of range";
+      break;
+    case 5:
+      retval = "Register map address out of range";
+      break;
+    case 6:
+      retval = "Register map write error";
+      break;
+    case 7:
+      retval = "BNO low power mode not  available for selected operation mode";
+      break;
+    case 8:
+      retval = "Accelerometer power mode not available";
+      break;
+    case 9:
+      retval = "Fusion algorithm configuration error";
+      break;
+    }
+    return retval;
+  }
+
+  void BNO055Sensor::publish_diagnostics()
+  {
+    try
+    {
+      u8 system_status;
+      u8 system_error;
+      u8 sys_calib_status;
+      u8 gyro_calib_status;
+      u8 accel_calib_status;
+      u8 mag_calib_status;
+
+      // get the status variables
+      s32 comres = BNO055_SUCCESS;
+
+      auto diagnostic_msg = diagnostic_msgs::msg::DiagnosticStatus();
+      diagnostic_msg.name = "BNO055";
+
+      comres += bno055_get_sys_stat_code(&system_status);
+      comres += bno055_get_sys_error_code(&system_error);
+      comres += bno055_get_sys_calib_stat(&sys_calib_status);
+      comres += bno055_get_gyro_calib_stat(&gyro_calib_status);
+      comres += bno055_get_accel_calib_stat(&accel_calib_status);
+      comres += bno055_get_mag_calib_stat(&mag_calib_status);
+
+      if (comres != BNO055_SUCCESS)
+      {
+        diagnostic_msg.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+        diagnostic_msg.message = "Disconnected";
+        diagnostic_msg.values.resize(0);
+      }
+      else if (system_status == 1)
+      {
+        diagnostic_msg.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+        diagnostic_msg.message = "BNO055 System Error";
+        diagnostic_msg.values.resize(1);
+        diagnostic_msg.values[0].key = "System Error";
+        diagnostic_msg.values[0].value = system_error_as_string(system_error);
       }
       else
       {
-	diagnostic_msg.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-	diagnostic_msg.message = "Operating Normally";
+        diagnostic_msg.values.resize(5);
+        diagnostic_msg.values[0].key = "System Status";
+        diagnostic_msg.values[0].value = system_status_as_string(system_status);
+        diagnostic_msg.values[1].key = "Calibration (SYS)";
+        diagnostic_msg.values[1].value = std::to_string(sys_calib_status);
+        diagnostic_msg.values[2].key = "Calibration (GYR)";
+        diagnostic_msg.values[2].value = std::to_string(gyro_calib_status);
+        diagnostic_msg.values[3].key = "Calibration (ACC)";
+        diagnostic_msg.values[3].value = std::to_string(accel_calib_status);
+        diagnostic_msg.values[4].key = "Calibration (MAG)";
+        diagnostic_msg.values[4].value = std::to_string(mag_calib_status);
+
+        if (sys_calib_status < 1 || gyro_calib_status < 1 || accel_calib_status < 1 || mag_calib_status < 1)
+        {
+          diagnostic_msg.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+          diagnostic_msg.message = "Poorly Calibrated";
+        }
+        else
+        {
+          diagnostic_msg.level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+          diagnostic_msg.message = "Operating Normally";
+        }
       }
+
+      diagnostics_publisher_->publish(diagnostic_msg);
     }
-
-    diagnostics_publisher_->publish(diagnostic_msg);
-
-  } catch (std::exception & e) {
-    RCLCPP_ERROR(this->get_logger(), "Failed to read sensor and publish diagnostics: %s", e.what());
+    catch (std::exception &e)
+    {
+      RCLCPP_ERROR(this->get_logger(), "Failed to read sensor and publish diagnostics: %s", e.what());
+    }
   }
-}
 
-} // namespace bno055_sensor  
+} // namespace bno055_sensor
