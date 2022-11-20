@@ -237,15 +237,15 @@ namespace bno055_sensor
     imu_data_msg.linear_acceleration.z = d_linear_accel_xyz.z;
 
     // set believable covariance values with zero mean
-    imu_data_msg.orientation_covariance[0] = 0.001;
-    imu_data_msg.orientation_covariance[4] = 0.001;
-    imu_data_msg.orientation_covariance[8] = 0.001;
-    imu_data_msg.angular_velocity_covariance[0] = 0.002;
-    imu_data_msg.angular_velocity_covariance[4] = 0.001;
-    imu_data_msg.angular_velocity_covariance[8] = 0.002;
-    imu_data_msg.linear_acceleration_covariance[0] = 0.001;
-    imu_data_msg.linear_acceleration_covariance[4] = 0.0001;
-    imu_data_msg.linear_acceleration_covariance[8] = -0.02;
+    // imu_data_msg.orientation_covariance[0] = 0.001;
+    // imu_data_msg.orientation_covariance[4] = 0.001;
+    // imu_data_msg.orientation_covariance[8] = 0.001;
+    // imu_data_msg.angular_velocity_covariance[0] = 0.002;
+    // imu_data_msg.angular_velocity_covariance[4] = 0.001;
+    // imu_data_msg.angular_velocity_covariance[8] = 0.002;
+    // imu_data_msg.linear_acceleration_covariance[0] = 0.001;
+    // imu_data_msg.linear_acceleration_covariance[4] = 0.0001;
+    // imu_data_msg.linear_acceleration_covariance[8] = -0.02;
 
     auto gravity_msg = geometry_msgs::msg::Vector3Stamped();
     gravity_msg.header.stamp = time_stamp;
