@@ -78,28 +78,33 @@ namespace bno055_sensor
     // set operation mode as CONFIG to start
     comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
 
-    bool config_loaded = true;
-    try
-    {
-      std::ifstream bno055_config;
-      bno055_config.open("bno055_config.cfg");
-      // write to registers 0x55 to 0x6A
-      u8 reg_ = 0x55;
-      std::string line;
-      while (getline(bno055_config, line))
+    u8 sys_calib;
+    bno055_get_sys_calib_stat(&sys_calib);
+
+    if (sys_calib != 3) {
+      bool config_loaded = true;
+      try
       {
-        // strip the newline character and load the integer value into data
-        u8 data_ = std::stoi(line);
-        comres += bno055_write_register(reg_, &data_, 1);
-        RCLCPP_INFO(this->get_logger(), "Wrote config data to register 0x%02x", reg_);
-        reg_++;
+        std::ifstream bno055_config;
+        bno055_config.open("bno055_config.cfg");
+        // write to registers 0x55 to 0x6A
+        u8 reg_ = 0x55;
+        std::string line;
+        while (getline(bno055_config, line))
+        {
+          // strip the newline character and load the integer value into data
+          u8 data_ = std::stoi(line);
+          comres += bno055_write_register(reg_, &data_, 1);
+          RCLCPP_INFO(this->get_logger(), "Wrote config data to register 0x%02x", reg_);
+          reg_++;
+        }
+        bno055_config.close();
       }
-      bno055_config.close();
-    }
-    catch (...)
-    {
-      RCLCPP_INFO(this->get_logger(), "Config file has not been created. Running in NDOF");
-      config_loaded = false;
+      catch (...)
+      {
+        RCLCPP_INFO(this->get_logger(), "Config file has not been created. Running in NDOF");
+        config_loaded = false;
+      }
     }
 
     comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_NDOF);
